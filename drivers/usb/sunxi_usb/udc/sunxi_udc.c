@@ -1359,32 +1359,13 @@ static void sunxi_udc_handle_ep0_idle(struct sunxi_udc *dev,
 {
 	int len = 0, ret = 0, tmp = 0;
 	int is_in = 0;
-	int setup_wait_tries = 0;
 
-	/*
-	 * start control request?
-	 *
-	 * If we got here via the SetupEnd path in sunxi_udc_handle_ep0() (a new
-	 * SETUP interrupted a still-pending prior transfer), the new SETUP's
-	 * bytes can still be a few cycles away from landing in the FIFO at the
-	 * exact moment we check. Bail too early here and that SETUP is silently
-	 * dropped: it's never decoded into a usb_ctrlrequest, so the gadget
-	 * driver's setup() callback never sees it and the host's control
-	 * transfer eventually times out. Give the hardware a brief, bounded
-	 * window to flag the data ready before giving up.
-	 */
-	while (!USBC_Dev_IsReadDataReady(
-		g_sunxi_udc_io.usb_bsp_hdle, USBC_EP_TYPE_EP0)) {
-		if (setup_wait_tries++ >= 50) {
-			DMSG_WARN("ep0_idle: setup data not ready after %d retries, dropping (ep0state=%d)\n",
-				  setup_wait_tries, dev->ep0state);
-			return;
-		}
-		udelay(2);
+	/* start control request? */
+	if (!USBC_Dev_IsReadDataReady(
+			g_sunxi_udc_io.usb_bsp_hdle, USBC_EP_TYPE_EP0)) {
+		/* DMSG_WARN("ERR: data is ready, can not read data.\n"); */
+		return;
 	}
-	if (setup_wait_tries)
-		DMSG_WARN("ep0_idle: setup data became ready after %d retries (ep0state=%d)\n",
-			  setup_wait_tries, dev->ep0state);
 
 	sunxi_udc_nuke(dev, ep, -EPROTO);
 
@@ -1720,6 +1701,16 @@ static void sunxi_udc_handle_ep0(struct sunxi_udc *dev)
 		sunxi_udc_nuke(dev, ep, 0);
 		USBC_Dev_Ctrl_ClearSetupEnd(g_sunxi_udc_io.usb_bsp_hdle);
 		dev->ep0state = EP0_IDLE;
+		/*
+		 * The new SETUP packet's bytes have not yet landed in the FIFO
+		 * at this point — the hardware will fire a fresh EP0 TX IRQ
+		 * once they arrive.  Return now and let that next IRQ call
+		 * sunxi_udc_handle_ep0_idle(); racing the FIFO here causes the
+		 * SETUP to be silently dropped every time.  This matches what
+		 * the upstream MUSB driver (musb_gadget_ep0.c) does after
+		 * writing MUSB_CSR0_P_SVDSETUPEND.
+		 */
+		return;
 	}
 
 	DMSG_DBG_UDC("sunxi_udc_handle_ep0--3--%d\n", dev->ep0state);
