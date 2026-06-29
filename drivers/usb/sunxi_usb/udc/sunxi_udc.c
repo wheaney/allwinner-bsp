@@ -1363,7 +1363,7 @@ static void sunxi_udc_handle_ep0_idle(struct sunxi_udc *dev,
 	/* start control request? */
 	if (!USBC_Dev_IsReadDataReady(
 		g_sunxi_udc_io.usb_bsp_hdle, USBC_EP_TYPE_EP0)) {
-		// DMSG_WARN("ERR: data is ready, can not read data.\n");
+		DMSG_WARN("ERR: data is ready, can not read data.\n");
 		return;
 	}
 
