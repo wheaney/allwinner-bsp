@@ -55,6 +55,18 @@
 
 #include "../sunxi_usb_trace.h"
 
+/*
+ * BREEZY_EP0_TRACE: comprehensive EP0 control-transfer logging at DMSG_WARN
+ * level (always reaches `journalctl -k`, unlike DMSG_DBG_UDC which compiles
+ * out).  Added 2026-06-30 to diagnose the GET_DESCRIPTOR(0x5f) loss without
+ * burning a full kernel-build cycle per hypothesis.  Logs: every raw SETUP
+ * (bmRequestType/bRequest/wValue/wIndex/wLength), the SetupEnd coalesce path
+ * (csr0/rxpktrdy + whether the belt fired), the driver->setup() handoff and
+ * its return code, and the IN-data-phase reply write.  REMOVE (set to 0)
+ * once the 0x5f path is confirmed working — it is verbose under enumeration.
+ */
+#define BREEZY_EP0_TRACE 1
+
 #if IS_ENABLED(CONFIG_POWER_SUPPLY)
 #include <linux/power_supply.h>
 #endif
@@ -1371,6 +1383,10 @@ static void sunxi_udc_handle_ep0_idle(struct sunxi_udc *dev,
 
 	len = sunxi_udc_read_fifo_crq(crq);
 	if (len != sizeof(*crq)) {
+#if BREEZY_EP0_TRACE
+		DMSG_WARN("breezy-ep0: SETUP read SHORT len=%d (expected %zu) -> STALL\n",
+			len, sizeof(*crq));
+#endif
 		USBC_Dev_ReadDataStatus(g_sunxi_udc_io.usb_bsp_hdle,
 				USBC_EP_TYPE_EP0, 0);
 		USBC_Dev_EpSendStall(g_sunxi_udc_io.usb_bsp_hdle,
@@ -1378,6 +1394,19 @@ static void sunxi_udc_handle_ep0_idle(struct sunxi_udc *dev,
 
 		return;
 	}
+
+#if BREEZY_EP0_TRACE
+	/*
+	 * Full raw SETUP, every control request, always in journalctl -k.
+	 * This is the line that tells us whether GET_DESCRIPTOR(0x5f) ever
+	 * reaches the driver and whether it is decoded correctly:
+	 *   bRequestType=0x80 bRequest=0x06 wValue=0x5f00 -> the 0x5f probe.
+	 */
+	DMSG_WARN("breezy-ep0: SETUP bmRequestType=0x%02x bRequest=0x%02x wValue=0x%04x wIndex=0x%04x wLength=%u\n",
+		crq->bRequestType, crq->bRequest,
+		le16_to_cpu(crq->wValue), le16_to_cpu(crq->wIndex),
+		le16_to_cpu(crq->wLength));
+#endif
 
 	DMSG_DBG_UDC("ep0: bRequest = %d bRequestType %d wLength = %d\n",
 		crq->bRequest, crq->bRequestType, crq->wLength);
@@ -1614,12 +1643,25 @@ static void sunxi_udc_handle_ep0_idle(struct sunxi_udc *dev,
 	else
 		dev->ep0state = EP0_OUT_DATA_PHASE;
 
-	if (!dev->driver)
+	if (!dev->driver) {
+#if BREEZY_EP0_TRACE
+		DMSG_WARN("breezy-ep0: no gadget driver bound, dropping SETUP req=0x%02x val=0x%04x\n",
+			crq->bRequest, le16_to_cpu(crq->wValue));
+#endif
 		return;
+	}
 
+#if BREEZY_EP0_TRACE
+	DMSG_WARN("breezy-ep0: -> driver->setup req=0x%02x val=0x%04x (handoff to gadget/raw_gadget)\n",
+		crq->bRequest, le16_to_cpu(crq->wValue));
+#endif
 	spin_unlock(&dev->lock);
 	ret = dev->driver->setup(&dev->gadget, crq);
 	spin_lock(&dev->lock);
+#if BREEZY_EP0_TRACE
+	DMSG_WARN("breezy-ep0: <- driver->setup req=0x%02x val=0x%04x returned %d, ep0state=%d\n",
+		crq->bRequest, le16_to_cpu(crq->wValue), ret, dev->ep0state);
+#endif
 	if (ret < 0) {
 		if (dev->req_config) {
 			DMSG_ERR("ERR: config change %02x fail %d?\n",
@@ -1696,7 +1738,17 @@ static void sunxi_udc_handle_ep0(struct sunxi_udc *dev)
 
 	/* clear setup end */
 	if (USBC_Dev_Ctrl_IsSetupEnd(g_sunxi_udc_io.usb_bsp_hdle)) {
+#if BREEZY_EP0_TRACE
+		{
+			u32 _csr = USBC_Readw(USBC_REG_CSR0(g_sunxi_udc_io.usb_vbase));
+			DMSG_WARN("breezy-ep0: SETUPEND ep0state=%d csr0=0x%04x rxpktrdy=%d\n",
+				dev->ep0state, _csr,
+				USBC_Dev_IsReadDataReady(g_sunxi_udc_io.usb_bsp_hdle,
+					USBC_EP_TYPE_EP0) ? 1 : 0);
+		}
+#else
 		DMSG_WARN("handle_ep0: ep0 setup end\n");
+#endif
 
 		sunxi_udc_nuke(dev, ep, 0);
 		USBC_Dev_Ctrl_ClearSetupEnd(g_sunxi_udc_io.usb_bsp_hdle);
@@ -1723,8 +1775,16 @@ static void sunxi_udc_handle_ep0(struct sunxi_udc *dev)
 		 */
 		ep0csr = USBC_Readw(USBC_REG_CSR0(g_sunxi_udc_io.usb_vbase));
 		if (USBC_Dev_IsReadDataReady(g_sunxi_udc_io.usb_bsp_hdle,
-					USBC_EP_TYPE_EP0))
+					USBC_EP_TYPE_EP0)) {
+#if BREEZY_EP0_TRACE
+			DMSG_WARN("breezy-ep0: SETUPEND coalesce-belt FIRED (SETUP already pending), decoding now\n");
+#endif
 			sunxi_udc_handle_ep0_idle(dev, ep, &crq, ep0csr);
+		}
+#if BREEZY_EP0_TRACE
+		else
+			DMSG_WARN("breezy-ep0: SETUPEND no pending SETUP, returning to wait for fresh IRQ\n");
+#endif
 
 		return;
 	}
@@ -1740,6 +1800,13 @@ static void sunxi_udc_handle_ep0(struct sunxi_udc *dev)
 	case EP0_IN_DATA_PHASE:			/* GET_DESCRIPTOR etc */
 		DMSG_DBG_UDC("EP0_IN_DATA_PHASE ... what now?\n");
 
+#if BREEZY_EP0_TRACE
+		DMSG_WARN("breezy-ep0: IN_DATA_PHASE csr0=0x%04x writerdy=%d req=%s\n",
+			ep0csr,
+			USBC_Dev_IsWriteDataReady(g_sunxi_udc_io.usb_bsp_hdle,
+				USBC_EP_TYPE_EP0) ? 1 : 0,
+			req ? "yes" : "NULL");
+#endif
 		if (!USBC_Dev_IsWriteDataReady(
 					g_sunxi_udc_io.usb_bsp_hdle,
 					USBC_EP_TYPE_EP0)
