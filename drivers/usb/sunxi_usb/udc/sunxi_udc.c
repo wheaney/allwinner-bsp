@@ -1702,14 +1702,30 @@ static void sunxi_udc_handle_ep0(struct sunxi_udc *dev)
 		USBC_Dev_Ctrl_ClearSetupEnd(g_sunxi_udc_io.usb_bsp_hdle);
 		dev->ep0state = EP0_IDLE;
 		/*
-		 * The new SETUP packet's bytes have not yet landed in the FIFO
-		 * at this point — the hardware will fire a fresh EP0 TX IRQ
-		 * once they arrive.  Return now and let that next IRQ call
-		 * sunxi_udc_handle_ep0_idle(); racing the FIFO here causes the
-		 * SETUP to be silently dropped every time.  This matches what
-		 * the upstream MUSB driver (musb_gadget_ep0.c) does after
-		 * writing MUSB_CSR0_P_SVDSETUPEND.
+		 * SetupEnd means the host ended the previous control transfer
+		 * "early" (it moved on to the next SETUP before we finished the
+		 * current one).  The host frequently pipelines that next SETUP
+		 * so its bytes are ALREADY waiting in the EP0 FIFO at this point
+		 * — this is exactly the case for the udl driver's repeated
+		 * GET_DESCRIPTOR(0x5f) probe, which arrives back-to-back with
+		 * the SetupEnd of the prior transfer.  If we just return here,
+		 * that already-present SETUP is never decoded and no fresh IRQ
+		 * ever comes for it (there is no new packet on the way — it is
+		 * the one we are throwing away), so the host retries forever.
+		 *
+		 * Mirror upstream musb_gadget_ep0.c, which after writing
+		 * MUSB_CSR0_P_SVDSETUPEND falls through and, if RXPKTRDY is
+		 * already set, services the pending SETUP in the same IRQ
+		 * (its "if (csr & MUSB_CSR0_RXPKTRDY) goto setup;").  Here:
+		 * re-read CSR0 and, if a SETUP is already pending, decode it
+		 * now via the normal idle path; otherwise return and let the
+		 * next EP0 IRQ handle it.
 		 */
+		ep0csr = USBC_Readw(USBC_REG_CSR0(g_sunxi_udc_io.usb_vbase));
+		if (USBC_Dev_IsReadDataReady(g_sunxi_udc_io.usb_bsp_hdle,
+					USBC_EP_TYPE_EP0))
+			sunxi_udc_handle_ep0_idle(dev, ep, &crq, ep0csr);
+
 		return;
 	}
 
