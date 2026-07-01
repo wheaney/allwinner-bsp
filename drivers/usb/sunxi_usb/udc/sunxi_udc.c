@@ -2298,6 +2298,23 @@ static irqreturn_t sunxi_udc_irq(int dummy, void *_dev)
 		dev->address = 0;
 		dev->ep0state = EP0_IDLE;
 
+		/*
+		 * Tell the gadget driver the bus was reset, mirroring upstream
+		 * musb_g_reset()'s usb_gadget_udc_reset() call.  Without this the
+		 * gadget driver never learns enumeration restarted: throw_away_all_urb()
+		 * only completes requests already on an EP queue, so a control transfer
+		 * that a deferred gadget (raw_gadget/FunctionFS) latched but had not yet
+		 * backed with a request stays "pending" forever and every later SETUP is
+		 * rejected -EBUSY.  This is exactly the wedge macOS triggers by aborting
+		 * the descriptor fetch and re-enumerating mid-handshake.  Drop the lock
+		 * around the callback as upstream does (it may re-enter the UDC).
+		 */
+		if (dev->driver) {
+			spin_unlock_irqrestore(&dev->lock, flags);
+			usb_gadget_udc_reset(&dev->gadget, dev->driver);
+			spin_lock_irqsave(&dev->lock, flags);
+		}
+
 		if (USBC_Dev_QueryTransferMode(g_sunxi_udc_io.usb_bsp_hdle)
 				== USBC_TS_MODE_HS) {
 			dev->gadget.speed = USB_SPEED_HIGH;
