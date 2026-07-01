@@ -65,7 +65,7 @@
  * its return code, and the IN-data-phase reply write.  REMOVE (set to 0)
  * once the 0x5f path is confirmed working — it is verbose under enumeration.
  */
-#define BREEZY_EP0_TRACE 1
+#define BREEZY_EP0_TRACE 0
 
 #if IS_ENABLED(CONFIG_POWER_SUPPLY)
 #include <linux/power_supply.h>
