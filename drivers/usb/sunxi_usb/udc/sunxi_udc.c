@@ -2308,8 +2308,20 @@ static irqreturn_t sunxi_udc_irq(int dummy, void *_dev)
 		 * rejected -EBUSY.  This is exactly the wedge macOS triggers by aborting
 		 * the descriptor fetch and re-enumerating mid-handshake.  Drop the lock
 		 * around the callback as upstream does (it may re-enter the UDC).
+		 *
+		 * Guard on gadget.speed exactly as upstream musb_g_reset() does
+		 * (drivers/usb/musb/musb_gadget.c: "if (musb->gadget_driver &&
+		 * musb->g.speed != USB_SPEED_UNKNOWN)").  gadget.speed is
+		 * USB_SPEED_UNKNOWN from bind until the FIRST reset sets it (just
+		 * below), so the very first enumeration reset — and any host's normal
+		 * single early reset (e.g. Windows' post-SET_CONFIGURATION reset) —
+		 * does NOT fire the callback and does not clobber EP0 state that is
+		 * mid-setup.  Only a re-enumeration (2nd+ reset, speed already set, or
+		 * macOS aborting mid-handshake) notifies the gadget and clears the
+		 * wedge.  Notifying unconditionally regressed Windows: it never sent
+		 * the DisplayLink bulk init stream after its normal reset.
 		 */
-		if (dev->driver) {
+		if (dev->driver && dev->gadget.speed != USB_SPEED_UNKNOWN) {
 			spin_unlock_irqrestore(&dev->lock, flags);
 			usb_gadget_udc_reset(&dev->gadget, dev->driver);
 			spin_lock_irqsave(&dev->lock, flags);
@@ -2403,6 +2415,23 @@ static irqreturn_t sunxi_udc_irq(int dummy, void *_dev)
 
 		usb_connect = 0;
 		usb_set_current = 0;
+
+		/*
+		 * Mirror upstream musb_g_disconnect(): notify the gadget driver
+		 * and reset gadget.speed to USB_SPEED_UNKNOWN.  Resetting the
+		 * speed re-arms the RESET-path guard above so the next
+		 * connection's first enumeration reset is again treated as a
+		 * fresh enumeration (no udc_reset callback), while a genuine
+		 * cable/host disconnect still tears down deferred-gadget EP0
+		 * state.  Drop the lock around the callback (it may re-enter).
+		 */
+		if (dev->driver && dev->gadget.speed != USB_SPEED_UNKNOWN) {
+			spin_unlock_irqrestore(&dev->lock, flags);
+			if (dev->driver->disconnect)
+				dev->driver->disconnect(&dev->gadget);
+			spin_lock_irqsave(&dev->lock, flags);
+		}
+		dev->gadget.speed = USB_SPEED_UNKNOWN;
 	}
 
 	/**
