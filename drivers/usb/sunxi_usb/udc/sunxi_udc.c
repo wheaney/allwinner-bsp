@@ -1698,6 +1698,33 @@ static void sunxi_udc_handle_ep0_idle(struct sunxi_udc *dev,
 					g_sunxi_udc_io.usb_bsp_hdle,
 					USBC_EP_TYPE_EP0, 1);
 		}
+	} else if (ret >= 0 &&
+		   !(crq->bRequestType & USB_DIR_IN) &&
+		   le16_to_cpu(crq->wLength) == 0) {
+		/*
+		 * No-data OUT control request handled by the gadget driver
+		 * (a vendor/class SETUP with wLength == 0, e.g. DisplayLink's
+		 * 0x14 init pulse).  Drive the status stage to completion NOW,
+		 * synchronously in this SETUP IRQ, exactly as the standard
+		 * SET_CONFIGURATION/SET_INTERFACE path above does.
+		 *
+		 * This MUST happen here and not be left to the gadget's queued
+		 * zero-length reply: FunctionFS defers a no-data OUT to userspace,
+		 * which only queues the reply after a read(ep0) round-trip
+		 * (milliseconds later).  During that window the host -- not seeing
+		 * its status stage acknowledged -- ends the transfer early, the
+		 * controller reports SetupEnd and resets ep0state to EP0_IDLE, and
+		 * the late reply then hits the EP0_IDLE default in sunxi_udc_queue
+		 * (-EL2HLT, surfaced to userspace as "Level 2 halted").  The host
+		 * retries forever and the device never advances.  Setting DATA_END
+		 * in the IRQ acks the transfer immediately so the host proceeds.
+		 * Guarded on driver->setup() success (ret >= 0); a failed setup
+		 * already stalled and returned above.
+		 */
+		USBC_Dev_ReadDataStatus(
+				g_sunxi_udc_io.usb_bsp_hdle,
+				USBC_EP_TYPE_EP0, 1);
+		dev->ep0state = EP0_IDLE;
 	}
 }
 
@@ -2980,6 +3007,22 @@ static int sunxi_udc_queue(struct usb_ep *_ep,
 				}
 				break;
 			default:
+				/*
+				 * ep0 already idle when a zero-length reply is
+				 * queued: the no-data OUT (e.g. DisplayLink 0x14)
+				 * whose status stage was already driven to
+				 * completion synchronously in the SETUP IRQ
+				 * (sunxi_udc_handle_ep0_idle now sets DATA_END for
+				 * vendor/class no-data OUT).  The gadget's late
+				 * zero-length reply has nothing left to do --
+				 * complete it cleanly instead of returning
+				 * -EL2HLT, which FunctionFS surfaces to userspace
+				 * as "Level 2 halted".
+				 */
+				if (!_req->length) {
+					req = NULL;
+					break;
+				}
 				spin_unlock_irqrestore(&ep->dev->lock, flags);
 				return -EL2HLT;
 			}
