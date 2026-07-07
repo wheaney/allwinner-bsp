@@ -1698,6 +1698,28 @@ static void sunxi_udc_handle_ep0_idle(struct sunxi_udc *dev,
 					g_sunxi_udc_io.usb_bsp_hdle,
 					USBC_EP_TYPE_EP0, 1);
 		}
+	} else if (ret >= 0 &&
+		   !(crq->bRequestType & USB_DIR_IN) &&
+		   le16_to_cpu(crq->wLength) == 0) {
+		/*
+		 * No-data OUT control request handled by the gadget driver
+		 * (vendor/class SETUP with wLength == 0, e.g. DisplayLink's 0x14
+		 * init pulse).  The standard SET_CONFIGURATION/SET_INTERFACE path
+		 * above drives the status stage to completion here, synchronously,
+		 * by setting DATA_END; but a vendor no-data OUT would otherwise
+		 * only complete DATA_END when the gadget's queued zero-length
+		 * reply request completes asynchronously.  On this controller that
+		 * lands several milliseconds late, so the host's control-transfer
+		 * status stage is not acknowledged in time: it ends the transfer
+		 * early (SetupEnd) and retries forever.  Drive DATA_END now, the
+		 * same way the standard no-data path does, so the ACK reaches the
+		 * host immediately.  Guarded on driver->setup() success (ret >= 0);
+		 * a failed setup already stalled above.
+		 */
+		USBC_Dev_ReadDataStatus(
+				g_sunxi_udc_io.usb_bsp_hdle,
+				USBC_EP_TYPE_EP0, 1);
+		dev->ep0state = EP0_IDLE;
 	}
 }
 
