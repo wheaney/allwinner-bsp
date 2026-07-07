@@ -2946,11 +2946,35 @@ static int sunxi_udc_queue(struct usb_ep *_ep,
 				}
 				break;
 			case EP0_OUT_DATA_PHASE:
-				if ((!_req->length)
-				    || (USBC_Dev_IsReadDataReady(
+				if (!_req->length) {
+					/*
+					 * Zero-length reply to a no-data OUT
+					 * control request (e.g. DisplayLink's
+					 * vendor 0x14 init pulse).  There is
+					 * nothing to read from the FIFO, so drive
+					 * the status stage to completion NOW by
+					 * setting DATA_END.  Without this the
+					 * request is marked done in software but
+					 * the hardware status ACK is not emitted
+					 * until a later ep0 IRQ, which lands
+					 * milliseconds after the SETUP -- long
+					 * enough that the host ends the transfer
+					 * early (the controller reports SetupEnd)
+					 * and retries the request forever.  The
+					 * standard no-data requests already set
+					 * DATA_END synchronously in the ep0 idle
+					 * handler; do the same here for gadget-
+					 * driver no-data OUT replies.
+					 */
+					USBC_Dev_ReadDataStatus(
+						g_sunxi_udc_io.usb_bsp_hdle,
+						USBC_EP_TYPE_EP0, 1);
+					dev->ep0state = EP0_IDLE;
+					req = NULL;
+				} else if (USBC_Dev_IsReadDataReady(
 						g_sunxi_udc_io.usb_bsp_hdle,
 						USBC_EP_TYPE_EP0)
-				    && sunxi_udc_read_fifo(ep, req))) {
+				    && sunxi_udc_read_fifo(ep, req)) {
 					dev->ep0state = EP0_IDLE;
 					req = NULL;
 				}
