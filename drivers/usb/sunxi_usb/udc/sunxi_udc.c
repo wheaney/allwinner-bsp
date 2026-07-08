@@ -1662,6 +1662,18 @@ static void sunxi_udc_handle_ep0_idle(struct sunxi_udc *dev,
 	DMSG_WARN("breezy-ep0: <- driver->setup req=0x%02x val=0x%04x returned %d, ep0state=%d\n",
 		crq->bRequest, le16_to_cpu(crq->wValue), ret, dev->ep0state);
 #endif
+	/*
+	 * DIAG (temporary): log driver->setup() return for the DisplayLink 0x14
+	 * no-data OUT init pulse.  ret == 0x7fff (USB_GADGET_DELAYED_STATUS)
+	 * means the function (FunctionFS) deferred the status stage to userspace
+	 * and we must NOT drive DATA_END here; ret == 0 means it completed
+	 * inline and driving DATA_END is safe.  This tells us which mechanism
+	 * the 0x14 uses without guessing.  Remove after evaluating.
+	 */
+	if ((crq->bRequestType & USB_TYPE_MASK) == USB_TYPE_VENDOR &&
+	    crq->bRequest == 0x14)
+		DMSG_WARN("breezy-ep0: 0x14 driver->setup ret=%d (0x%x) ep0state=%d wLength=%d\n",
+			ret, ret, dev->ep0state, le16_to_cpu(crq->wLength));
 	if (ret < 0) {
 		if (dev->req_config) {
 			DMSG_ERR("ERR: config change %02x fail %d?\n",
@@ -1698,11 +1710,17 @@ static void sunxi_udc_handle_ep0_idle(struct sunxi_udc *dev,
 					g_sunxi_udc_io.usb_bsp_hdle,
 					USBC_EP_TYPE_EP0, 1);
 		}
-	} else if (ret >= 0 &&
+	} else if (ret == 0 &&
 		   !(crq->bRequestType & USB_DIR_IN) &&
 		   le16_to_cpu(crq->wLength) == 0) {
 		/*
-		 * No-data OUT control request handled by the gadget driver
+		 * No-data OUT control request the gadget driver COMPLETED INLINE
+		 * (ret == 0, not USB_GADGET_DELAYED_STATUS == 0x7fff).  If the
+		 * function deferred the status stage to userspace (DELAYED_STATUS)
+		 * we must NOT drive DATA_END here -- doing so pre-empts the
+		 * deferred completion and the userspace read(ep0) then fails
+		 * EPROTO.  Only ack inline-completed no-data OUTs.
+		 *
 		 * (a vendor/class SETUP with wLength == 0, e.g. DisplayLink's
 		 * 0x14 init pulse).  Drive the status stage to completion NOW,
 		 * synchronously in this SETUP IRQ, exactly as the standard
